@@ -1,0 +1,7 @@
+{
+  "id": "com.fantaselion.enemy_attribute_randomizer",
+  "name": "Enemy Attribute Randomizer",
+  "version": "0.8.0",
+  "author": "Fantaselion",
+  "description": "Randomizes selected attributes independently for each enemy actor."
+}

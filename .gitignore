@@ -1,0 +1,10 @@
+build/
+build-*/
+.vs/
+src/enemies/deku_baba_patch.cpp
+src/enemies/deku_baba_patch.hpp
+src/enemies/deku_baba_vanilla_hook_test.cpp
+src/enemies/deku_baba_vanilla_hook_test.hpp
+
+*.md
+*.txt
