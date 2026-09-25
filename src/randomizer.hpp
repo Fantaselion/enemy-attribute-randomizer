@@ -53,7 +53,8 @@ bool scale_gravity_with_movement();
 // When true, the effective notice multiplier is the actor's size multiplier.
 bool notice_range_uses_size();
 
-// Returns a COPY of this actor's stable values. Do not store a reference.
+// Returns a COPY of this actor's stable values. Rolls use stage/room placement
+// identity rather than the session-local process ID. Do not store a reference.
 Attributes attributes_for(fopAc_ac_c* actor);
 
 // Call this from the enemy's Delete hook so a recycled process ID cannot

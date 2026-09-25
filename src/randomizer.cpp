@@ -1,5 +1,6 @@
 #include "randomizer.hpp"
 
+#include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_name.h"
 #include "mods/svc/log.h"
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace enemy_randomizer {
@@ -15,6 +17,8 @@ namespace {
 struct ActorRecord {
     fpc_ProcID id;
     fopAc_ac_c* address;
+    std::uint64_t placementKey;
+    std::uint32_t instance;
     Attributes attributes;
 };
 
@@ -43,6 +47,81 @@ std::uint32_t mix(std::uint32_t value) {
     value *= 0x846CA68Bu;
     value ^= value >> 16;
     return value;
+}
+
+// Hash explicit bytes instead of using std::hash or a process ID. Neither the
+// actor allocation address nor its process ID survives a room reload.
+constexpr std::uint64_t kHashOffset = 14695981039346656037ull;
+constexpr std::uint64_t kHashPrime = 1099511628211ull;
+
+std::uint64_t hash_byte(std::uint64_t hash, std::uint8_t value) {
+    return (hash ^ value) * kHashPrime;
+}
+
+std::uint64_t hash_word(std::uint64_t hash, std::uint32_t value) {
+    for (int i = 0; i < 4; ++i) {
+        hash = hash_byte(hash, static_cast<std::uint8_t>(value));
+        value >>= 8;
+    }
+    return hash;
+}
+
+std::uint64_t hash_position(std::uint64_t hash, const cXyz& position) {
+    // The stage loader supplies the same float coordinates on each visit.
+    // memcpy avoids aliasing violations and host-dependent std::hash<float>.
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &position.x, sizeof(bits));
+    hash = hash_word(hash, bits);
+    std::memcpy(&bits, &position.y, sizeof(bits));
+    hash = hash_word(hash, bits);
+    std::memcpy(&bits, &position.z, sizeof(bits));
+    return hash_word(hash, bits);
+}
+
+std::uint64_t placement_key(fopAc_ac_c* actor, int parentDepth = 0) {
+    std::uint64_t hash = kHashOffset;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage != nullptr) {
+        for (int i = 0; i < 16 && stage[i] != '\0'; ++i) {
+            hash = hash_byte(hash, static_cast<std::uint8_t>(stage[i]));
+        }
+    }
+    hash = hash_byte(hash, 0);
+
+    hash = hash_word(hash, static_cast<std::uint32_t>(actor->home.roomNo));
+    hash = hash_word(hash, static_cast<std::uint16_t>(fopAcM_GetName(actor)));
+    hash = hash_word(hash, actor->setID);
+    hash = hash_word(hash, fopAcM_GetParam(actor));
+    hash = hash_word(hash, static_cast<std::uint32_t>(actor->argument));
+    hash = hash_position(hash, actor->home.pos);
+    hash = hash_word(hash, static_cast<std::uint16_t>(actor->home.angle.x));
+    hash = hash_word(hash, static_cast<std::uint16_t>(actor->home.angle.y));
+    hash = hash_word(hash, static_cast<std::uint16_t>(actor->home.angle.z));
+
+    // 0xFFFF means the actor has no stage placement ID. A parent's stable
+    // identity separates children from different spawners at the same spot.
+    if (actor->setID == 0xFFFF && parentDepth < 4) {
+        fopAc_ac_c* parent = fopAcM_SearchByID(actor->parentActorID);
+        if (parent != nullptr && parent != actor) {
+            const std::uint64_t parentKey = placement_key(parent, parentDepth + 1);
+            hash = hash_word(hash, static_cast<std::uint32_t>(parentKey));
+            hash = hash_word(hash, static_cast<std::uint32_t>(parentKey >> 32));
+        }
+    }
+    return hash;
+}
+
+std::uint32_t unused_instance(std::uint64_t placementKey) {
+    // Two live actors can have precisely the same placement metadata (for
+    // example, multiple children spawned at one point). Give each a distinct
+    // roll while allowing that slot to be reused on a later room visit.
+    std::uint32_t instance = 0;
+    while (std::any_of(g_actorRecords.begin(), g_actorRecords.end(), [placementKey, instance](const ActorRecord& record) {
+        return record.placementKey == placementKey && record.instance == instance;
+    })) {
+        ++instance;
+    }
+    return instance;
 }
 
 float unit_float(std::uint32_t value) {
@@ -77,14 +156,8 @@ float random_in_range(
     return range.minimum + ((range.maximum - range.minimum) * t);
 }
 
-Attributes generate_for(fopAc_ac_c* actor) {
-    const std::uint32_t id = fopAcM_GetID(actor);
-    const std::uint32_t profile =
-        static_cast<std::uint16_t>(fopAcM_GetName(actor));
-
-    const std::uint32_t actorKey = mix(
-        g_settings.seed ^ id ^ (profile << 16)
-    );
+Attributes generate_for(std::uint64_t placementKey, std::uint32_t instance) {
+    const std::uint32_t actorKey = mix(g_settings.seed ^ static_cast<std::uint32_t>(placementKey) ^ static_cast<std::uint32_t>(placementKey >> 32) ^ mix(instance));
 
     return Attributes{
         .size = random_in_range(g_settings.size, actorKey, 0xA341316Cu),
@@ -157,21 +230,31 @@ Attributes attributes_for(fopAc_ac_c* actor) {
         return record.id == id;
     });
 
-    const Attributes attributes = generate_for(actor);
+    const std::uint64_t placementKey = placement_key(actor);
+    const std::uint32_t instance = unused_instance(placementKey);
+    const Attributes attributes = generate_for(placementKey, instance);
     g_actorRecords.push_back(ActorRecord{
         .id = id,
         .address = actor,
+        .placementKey = placementKey,
+        .instance = instance,
         .attributes = attributes,
     });
 
+    const char* stage = dComIfGp_getStartStageName();
+    const int room = actor->home.roomNo >= 0 ? actor->home.roomNo : actor->current.roomNo;
     char message[320];
     std::snprintf(
         message,
         sizeof(message),
-        "actor %u attributes: size %.3fx, movement/animation %.3fx, "
+        "stage %.16s room %d actor %u placement %016llX slot %u attributes: size %.3fx, movement/animation %.3fx, "
         "health %.3fx, damage %.3fx, notice %.3fx%s, Link knockback %.3fx, "
         "stun duration %.3fx",
+        stage != nullptr ? stage : "unknown",
+        room,
         static_cast<unsigned>(id),
+        static_cast<unsigned long long>(placementKey),
+        static_cast<unsigned>(instance),
         attributes.size,
         attributes.movementSpeed,
         attributes.health,

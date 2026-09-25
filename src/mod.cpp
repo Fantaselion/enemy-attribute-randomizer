@@ -392,7 +392,8 @@ ModResult build_mods_panel(
     result = add_number(
         panel,
         "Seed",
-        "The same seed and actor spawn order produce the same multipliers.",
+        "The same seed gives each room placement the same attributes across visits and restarts. "
+        "Dynamic spawns also use their spawn details; identical spawns use live slots.",
         g_seed,
         0,
         2147483647
