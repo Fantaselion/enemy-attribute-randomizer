@@ -97,7 +97,7 @@ bool is_supported_enemy(const s16 profile) {
     case fpcNm_E_HP_e:
     case fpcNm_E_HZ_e:
     case fpcNm_E_HZELDA_e:
-    case fpcNm_E_IS_e:
+    //case fpcNm_E_IS_e: // Unused enemy
     case fpcNm_E_KG_e:
     case fpcNm_E_KK_e:
     case fpcNm_E_KR_e:

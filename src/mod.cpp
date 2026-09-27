@@ -13,6 +13,12 @@
 #include <cstdio>
 #include <cstdint>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 DEFINE_MOD();
 
 // Import each service once, in this translation unit. Enemy files can use the
@@ -23,7 +29,7 @@ IMPORT_SERVICE(LogService, svc_log);
 // that still provides HookService/UIService 1.0.
 IMPORT_SERVICE_VERSION(HookService, svc_hook, 0);
 IMPORT_SERVICE(ConfigService, svc_config);
-IMPORT_SERVICE_VERSION(UiService, svc_ui, 0);
+IMPORT_SERVICE_VERSION(UiService, svc_ui, 3);
 IMPORT_SERVICE(ActorAttributeService, svc_actor_attribute);
 
 namespace {
@@ -32,6 +38,12 @@ ConfigVarHandle g_enabled = 0;
 ConfigVarHandle g_scaleGravityWithMovement = 0;
 ConfigVarHandle g_noticeRangeUsesSize = 0;
 ConfigVarHandle g_seed = 0;
+ConfigVarHandle g_useAboveVanillaChance = 0;
+ConfigVarHandle g_aboveVanillaChancePercent = 0;
+UiStyleHandle g_chanceStyle = 0;
+#if defined(_WIN32)
+bool g_rerollKeyWasDown = false;
+#endif
 ConfigVarHandle g_sizeMinimum = 0;
 ConfigVarHandle g_sizeMaximum = 0;
 ConfigVarHandle g_movementMinimum = 0;
@@ -134,6 +146,21 @@ bool notice_range_controls_disabled(ModContext*, void*) {
     return get_bool(g_noticeRangeUsesSize, false);
 }
 
+bool above_vanilla_chance_disabled(ModContext*, void*) {
+    return !get_bool(g_useAboveVanillaChance, true);
+}
+
+bool above_vanilla_chance_selected(ModContext*, void*) {
+    return get_bool(g_useAboveVanillaChance, true);
+}
+
+void toggle_above_vanilla_chance(ModContext*, void*) {
+    const bool enabled = get_bool(g_useAboveVanillaChance, true);
+    if (svc_config->set_bool(mod_ctx, g_useAboveVanillaChance, !enabled) != MOD_OK) {
+        svc_log->error(mod_ctx, "failed to change above-vanilla roll chance toggle");
+    }
+}
+
 bool always_disabled(ModContext*, void*) {
     return true;
 }
@@ -208,6 +235,10 @@ enemy_randomizer::Settings read_settings() {
         // Keep the resolver at vanilla even if an older config file still
         // contains non-vanilla stun values.
         .stunDuration = enemy_randomizer::FloatRange{1.0f, 1.0f},
+        .useAboveVanillaChance = get_bool(g_useAboveVanillaChance, true),
+        .aboveVanillaChancePercent = static_cast<std::uint32_t>(
+            std::clamp(get_int(g_aboveVanillaChancePercent, 50), std::int64_t{0}, std::int64_t{100})
+        ),
     };
 }
 
@@ -264,6 +295,22 @@ void on_randomize_seed_and_reroll(ModContext*, void*) {
     svc_log->info(mod_ctx, message);
 }
 
+void update_reroll_hotkey() {
+#if defined(_WIN32)
+    const bool keyDown = (GetAsyncKeyState('M') & 0x8000) != 0;
+    const bool pressed = keyDown && !g_rerollKeyWasDown;
+    g_rerollKeyWasDown = keyDown;
+
+    if (pressed) {
+        DWORD foregroundProcessId = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcessId);
+        if (foregroundProcessId == GetCurrentProcessId()) {
+            on_randomize_seed_and_reroll(mod_ctx, nullptr);
+        }
+    }
+#endif
+}
+
 ModResult add_button(
     UiElementHandle panel,
     const char* label,
@@ -293,6 +340,21 @@ ModResult add_toggle(
     control.config_var = handle;
 
     return svc_ui->pane_add_control(mod_ctx, panel, &control, nullptr);
+}
+
+ModResult add_chance_checkbox(UiElementHandle row) {
+    UiControlDesc control = UI_CONTROL_DESC_INIT;
+    control.kind = UI_CONTROL_ICON_BUTTON;
+    control.label = "Use above-vanilla chance";
+    control.tooltip = "Check to choose the chance of an above-100% roll; uncheck to sample uniformly over the full range.";
+    control.icon = "check";
+    control.on_pressed = toggle_above_vanilla_chance;
+    control.is_selected = above_vanilla_chance_selected;
+
+    UiElementHandle checkbox = 0;
+    ModResult result = svc_ui->pane_add_control(mod_ctx, row, &control, &checkbox);
+    if (result != MOD_OK) return result;
+    return svc_ui->elem_set_class(mod_ctx, checkbox, "above-vanilla-checkbox", true);
 }
 
 ModResult add_number(
@@ -398,6 +460,38 @@ ModResult build_mods_panel(
         0,
         2147483647
     );
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    UiRowDesc chanceRow = UI_ROW_DESC_INIT;
+    UiElementHandle chanceRowHandle = 0;
+    result = svc_ui->pane_add_row(mod_ctx, panel, &chanceRow, &chanceRowHandle);
+    if (result != MOD_OK) {
+        return result;
+    }
+    result = svc_ui->elem_set_class(mod_ctx, chanceRowHandle, "above-vanilla-row", true);
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    result = add_number(
+        chanceRowHandle,
+        "Chance random roll is higher",
+        "Chance to roll between 100% and the maximum when a range crosses 100%. "
+        "The remaining chance rolls between the minimum and 100%. "
+        "Ranges entirely on one side of 100% always use their full range.",
+        g_aboveVanillaChancePercent,
+        0,
+        100,
+        "%",
+        above_vanilla_chance_disabled
+    );
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    result = add_chance_checkbox(chanceRowHandle);
     if (result != MOD_OK) {
         return result;
     }
@@ -560,6 +654,11 @@ ModResult register_settings(ModError* error) {
     result = register_int("seed", 12345, g_seed, error);
     if (result != MOD_OK) return result;
 
+    result = register_bool("useAboveVanillaChance", true, g_useAboveVanillaChance, error);
+    if (result != MOD_OK) return result;
+    result = register_int("aboveVanillaChancePercent", 50, g_aboveVanillaChancePercent, error);
+    if (result != MOD_OK) return result;
+
     result = register_int("sizeMinimumPercent", 50, g_sizeMinimum, error);
     if (result != MOD_OK) return result;
     result = register_int("sizeMaximumPercent", 200, g_sizeMaximum, error);
@@ -626,6 +725,9 @@ extern "C" {
 
 MOD_EXPORT ModResult mod_initialize(ModError* error) {
     enemy_randomizer::clear();
+#if defined(_WIN32)
+    g_rerollKeyWasDown = (GetAsyncKeyState('M') & 0x8000) != 0;
+#endif
 
     ModResult result = register_settings(error);
     if (result != MOD_OK) {
@@ -633,6 +735,14 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     }
 
     enemy_randomizer::configure(read_settings());
+
+    result = svc_ui->register_styles(mod_ctx, UI_SCOPE_WINDOW,
+        "ui-row.above-vanilla-row select-button { flex: 1 1 auto; } "
+        "ui-row.above-vanilla-row button.above-vanilla-checkbox { flex: 0 0 28dp; width: 28dp; height: 28dp; padding: 2dp; border: 1dp solid #b8b8a0; border-radius: 3dp; } "
+        "ui-row button.above-vanilla-checkbox icon { opacity: 0; } "
+        "ui-row button.above-vanilla-checkbox:selected icon { opacity: 1; }",
+        &g_chanceStyle);
+    if (result != MOD_OK) return result;
 
     UiModsPanelDesc panel = UI_MODS_PANEL_DESC_INIT;
     panel.build = build_mods_panel;
@@ -659,6 +769,7 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    update_reroll_hotkey();
     // Config reads are cheap, and this lets range changes affect the next actor
     // without requiring a reload. Already-recorded actors retain their values.
     enemy_randomizer::configure(read_settings());
@@ -669,6 +780,10 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     enemy_patches::shutdown_all();
     enemy_randomizer::clear();
+    if (g_chanceStyle != 0) {
+        svc_ui->unregister_styles(mod_ctx, g_chanceStyle);
+        g_chanceStyle = 0;
+    }
     return MOD_OK;
 }
 

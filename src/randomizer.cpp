@@ -136,23 +136,20 @@ float random_in_range(
 ) {
     const float t = unit_float(actorKey ^ attributeSalt);
 
-    // Only rebalance ranges that cross vanilla and have a wider upper side.
-    // For example, 0.25-4.0 becomes 50/50 below/above 1.0; 0.25-1.25
-    // stays uniform over the full range (75% below, 25% above).
-    if (g_settings.balanceWideUpperRanges &&
-        range.minimum < 1.0f && range.maximum > 1.0f &&
-        (range.maximum - 1.0f) > (1.0f - range.minimum))
-    {
-        // Reuse the same deterministic draw: each half of t selects one side,
-        // then remap that half to a uniform draw within its selected interval.
-        if (t < 0.5f) {
-            return range.minimum + ((1.0f - range.minimum) * (t * 2.0f));
+    if (g_settings.useAboveVanillaChance && range.minimum < 1.0f && range.maximum > 1.0f) {
+        const float belowChance = (100.0f - static_cast<float>(g_settings.aboveVanillaChancePercent)) / 100.0f;
+        if (belowChance >= 1.0f) {
+            return range.minimum + ((1.0f - range.minimum) * t);
         }
-
-        return 1.0f + ((range.maximum - 1.0f) * ((t - 0.5f) * 2.0f));
+        if (belowChance <= 0.0f) {
+            return 1.0f + ((range.maximum - 1.0f) * t);
+        }
+        if (t < belowChance) {
+            return range.minimum + ((1.0f - range.minimum) * (t / belowChance));
+        }
+        return 1.0f + ((range.maximum - 1.0f) * ((t - belowChance) / (1.0f - belowChance)));
     }
 
-    // Preserve the original values when the option is off or doesn't apply.
     return range.minimum + ((range.maximum - range.minimum) * t);
 }
 
@@ -194,6 +191,7 @@ Attributes generate_for(std::uint64_t placementKey, std::uint32_t instance) {
 
 void configure(const Settings& settings) {
     g_settings = settings;
+    g_settings.aboveVanillaChancePercent = std::min(g_settings.aboveVanillaChancePercent, 100u);
     g_settings.size = normalized(g_settings.size);
     g_settings.movementSpeed = normalized(g_settings.movementSpeed);
     g_settings.health = normalized(g_settings.health);

@@ -27,10 +27,10 @@ struct Settings {
     // audited. The setting remains part of the data model for later use.
     FloatRange stunDuration{1.0f, 1.0f};
 
-    // For each range crossing 1.0, use a 50/50 below/above-vanilla split only
-    // when its upper side is wider. Other ranges keep their uniform sampling.
-    // Set false to restore the original sampling for every attribute.
-    bool balanceWideUpperRanges = true;
+    // Split ranges crossing vanilla into a configurable chance of rolling
+    // above 100%. Disabled ranges sample uniformly across their full span.
+    bool useAboveVanillaChance = true;
+    std::uint32_t aboveVanillaChancePercent = 50;
 };
 
 struct Attributes {
